@@ -1208,6 +1208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
+  replace an existing `config.yaml` in one step (temp file in the same
+  directory, fsync, rename) instead of truncating and rewriting it in place.
+  A bd process reading the file mid-write, such as a command starting up or
+  `bd serve` resolving events-journal activation at startup, could see an
+  empty or partial file, which parses as "key absent" and resolves to the
+  key's default. On Linux and macOS a reader now sees the whole old file or
+  the whole new one. Windows does not let a file that another process holds
+  open be replaced, so there the write waits up to about two seconds for the
+  reader to close it and otherwise fails with the old file intact. A
+  symlinked `config.yaml` is written through to its target, the file keeps
+  its own permissions, and a read-only `config.yaml` is still refused. The
+  user-global `config.yaml` gets the same treatment.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
@@ -1247,6 +1260,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a formula write target (see Security). Shell environment still wins over
   the file.
 
+- `bd query` now matches non-ASCII values. Its lexer read the query one
+  byte at a time, so a quoted value such as `title="größe test"` reached the
+  filter re-encoded and silently matched nothing, and a bare one either
+  failed to lex (`title=größe`: `unexpected character '¶'`) or was mangled
+  (`label=fête`). The lexer now decodes UTF-8 and keeps values exactly as
+  typed (#7539).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
@@ -1256,6 +1275,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because an imported or promoted wisp's row in the durable table already
   held its id. On a proxied-server workspace the same id was instead written
   into both tables (#5106).
+- **`bd doctor --fix` no longer backs up or deletes a database outside the
+  workspace.** Automatic integrity recovery and the repo fingerprint fix's
+  "Reinitialize database" choice acted on whatever path `metadata.json`
+  selected, so a `dolt_data_dir` or `database` pointing outside `.beads`, at
+  `.beads` itself, or through a symlink moved or deleted unrelated data. Both
+  now refuse such a path before the backup or the DELETE prompt, unless
+  `BEADS_DOLT_DATA_DIR` selects it; a symlinked `.beads` is still supported.
+  When `bd init` fails during recovery, the restore checks the location again
+  and, if it changed meanwhile, leaves the backup in place and names it
+  (#7889, #8070, from @Wenjix).
+- **`bd hooks install` no longer writes hooks through a symlinked hooks
+  directory.** When the selected hooks directory (`.git/hooks`, a
+  `core.hooksPath` directory, `.beads-hooks/` or `.beads/hooks/`) was itself a
+  symlink, install copied preexisting hooks into, and wrote bd sections over
+  hooks in, the link's target, then pointed `core.hooksPath` at it. Install
+  now refuses such a directory, dangling links included, before any of those
+  steps; a symlinked `.beads` workspace above it is still supported. Hook
+  migration likewise refuses to create a hook whose parent directory is a
+  symlink. `bd hooks uninstall` refuses a symlinked hooks directory before
+  editing hooks or resetting `core.hooksPath`, leaves symlinked hooks alone,
+  and restores a legacy `.backup` only when it is a regular file, so a
+  symlink or directory never becomes the hook (#7889, #8070, from @Wenjix).
+
 - **`bd delete --cascade` and `bd admin cleanup --cascade` now delete only
   parent-child descendants** (GH#6301). The cascade used to follow every
   dependency type, so deleting an issue also deleted whatever was
@@ -1360,6 +1402,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ... nothing to commit`. The migration pass now turns the setting off for
   its own session and restores it on return. The same error at migration
   0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
+- A long-lived proxied-server or external-server connection pool, such as
+  the one an embedder's unit-of-work provider keeps, now survives its local
+  proxy exiting on idle. Each new connection looks the proxy up again,
+  adopting a live one or starting a replacement, instead of dialing the
+  address chosen when the pool was opened, which a replacement proxy may no
+  longer use; until now every later query failed with `invalid connection`
+  until the process restarted. A connection whose lookup fails reports
+  `uow: rediscover proxy endpoint: <cause>` (#7295; builds on #7998 by
+  @vishnujayvel).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
